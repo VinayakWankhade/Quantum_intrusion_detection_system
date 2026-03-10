@@ -23,6 +23,7 @@ def main():
     parser = argparse.ArgumentParser(description="Advanced Quantum IDS Project Runner")
     parser.add_argument('--preprocess', action='store_true', help="Run full robust ML data preprocessing pipeline")
     parser.add_argument('--train-classical', action='store_true', help="Train all Classical ML models (SVM, Random Forest)")
+    parser.add_argument('--skip-svm', action='store_true', help="Skips SVM training (useful for fast testing of Random Forest)")
     parser.add_argument('--train-quantum', action='store_true', help="Train all Quantum ML models on downsampled subsets (QSVM, VQC)")
     parser.add_argument('--tune', action='store_true', help="When combined with --train-classical, rigorously tunes hyperparameters")
     
@@ -46,8 +47,11 @@ def main():
         
     if args.train_classical:
         logger.info(f"Triggering Classical Model Training (Hyperparameter Tuning: {args.tune})")
-        logger.info("Training SVM...")
-        train_svm(tune_hyperparameters=args.tune)
+        if not args.skip_svm:
+            logger.info("Training SVM...")
+            train_svm(tune_hyperparameters=args.tune)
+        else:
+            logger.info("Skipping SVM as requested.")
         
         logger.info("Training Random Forest...")
         train_random_forest(tune_hyperparameters=args.tune)
