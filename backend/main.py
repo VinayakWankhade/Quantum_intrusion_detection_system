@@ -31,6 +31,17 @@ live_packet_queue = Queue()
 sniff_mode = "simulation" # "simulation" or "live"
 sniffer = None
 
+# Real-time Accuracy Stats
+session_stats = {
+    "classical_correct": 0,
+    "classical_total": 0,
+    "quantum_correct": 0,
+    "quantum_total": 0,
+    "hybrid_correct": 0,
+    "hybrid_total": 0,
+    "quantum_catches": 0
+}
+
 def packet_callback(pkt_data):
     live_packet_queue.put(pkt_data)
 
@@ -39,26 +50,29 @@ async def lifespan(app: FastAPI):
     global models, test_df, sniffer
     logger.info("Starting up FastAPI Backend for Quantum IDS")
     
-    # Load Unified Models
+    # Load Unified Models (Classical Brain)
     path = os.path.join(MODELS_DIR, "unified_rf_model.pkl")
     if os.path.exists(path):
         try:
             models["RandomForest"] = joblib.load(path)
-            logger.info("Loaded Unified RandomForest Model")
+            pre_dir = os.path.join(MODELS_DIR, "preprocessing")
+            models["scaler_unified"] = joblib.load(os.path.join(pre_dir, "scaler_unified.pkl"))
+            models["pca_unified"] = joblib.load(os.path.join(pre_dir, "pca_unified.pkl"))
+            logger.info("Loaded Optimized Tuned RandomForest & Preprocessing")
         except Exception as e:
-            logger.warning(f"Failed to load Unified Model: {e}")
+            logger.warning(f"Failed to load Tuned Model: {e}")
 
-    # Load Quantum Specialist
+    # Load Quantum Specialist (QSVC) for Rare Attacks
     q_path = os.path.join(MODELS_DIR, "qsvc_specialist.pkl")
     if os.path.exists(q_path):
         try:
             models["QSVM_Specialist"] = joblib.load(q_path)
-            pre_dir = "models/saved/preprocessing/quantum"
-            models["q_scaler"] = joblib.load(os.path.join(pre_dir, "scaler_specialist.pkl"))
-            models["q_pca"] = joblib.load(os.path.join(pre_dir, "pca_specialist.pkl"))
-            logger.info("Loaded Quantum Specialist (QSVC) for Rare Attacks")
+            q_pre_dir = "models/saved/preprocessing/quantum"
+            models["q_scaler"] = joblib.load(os.path.join(q_pre_dir, "scaler_specialist.pkl"))
+            models["q_pca"] = joblib.load(os.path.join(q_pre_dir, "pca_specialist.pkl"))
+            logger.info("Loaded Optimized Tuned Quantum Specialist (QSVC)")
         except Exception as e:
-            logger.warning(f"Failed to load Quantum Specialist: {e}")
+            logger.warning(f"Failed to load Tuned Quantum Specialist: {e}")
 
     # Load test dataset
     try:
@@ -151,26 +165,60 @@ async def websocket_endpoint(websocket: WebSocket):
             
             if "RandomForest" in models:
                 used_model = "RandomForest"
-                pred = models['RandomForest'].predict(X)
-                prediction_result = int(pred[0])
-                confidence = float(models['RandomForest'].predict_proba(X)[0].max() * 100)
                 
-                # Hybrid Logic: Quantum Specialist Audit
+                # 1. Classical Preprocessing & Prediction
+                # If simulation, X might need scaling/pca
+                X_scaled = models["scaler_unified"].transform(X)
+                X_pca = models["pca_unified"].transform(X_scaled)
+                rf_pred = int(models['RandomForest'].predict(X_pca)[0])
+                prediction_result = rf_pred
+                confidence = float(models['RandomForest'].predict_proba(X_pca)[0].max() * 100)
+                
+                # Update Session Classical Stats (In simulation we have true_y)
+                if sniff_mode == "simulation" and "true_label" in packet_data:
+                    session_stats["classical_total"] += 1
+                    if rf_pred == packet_data["true_label"]:
+                        session_stats["classical_correct"] += 1
+
+                # 2. Quantum Specialist Audit (Hybrid Logic)
+                is_quantum_catch = False
                 if "QSVM_Specialist" in models:
                     try:
-                        # Extract core features for Quantum (must match specialist training)
-                        # X is a DataFrame (Simulation) or something from sniffer (Live)
+                        # Only audit if RF is uncertain or it's a high-priority packet
+                        # For this dashboard implementation, we audit all for visibility
                         q_feat = X[['duration', 'src_bytes', 'dst_bytes', 'count', 'srv_count']]
                         q_scaled = models["q_scaler"].transform(q_feat)
                         q_pca = models["q_pca"].transform(q_scaled)
-                        q_pred = models["QSVM_Specialist"].predict(q_pca)[0]
+                        q_pred = int(models["QSVM_Specialist"].predict(q_pca)[0])
                         
+                        # Is it a rare attack? (Based on ground truth in simulation)
+                        is_rare = False
+                        if sniff_mode == "simulation" and "true_label" in packet_data:
+                            # Get the actual label string to check for rarity
+                            actual_label = str(sample["label"].values[0])
+                            is_rare = any(r in actual_label for r in ["Infiltration", "Sql Injection", "Heartbleed"])
+                            
+                            if is_rare:
+                                session_stats["quantum_total"] += 1
+                                if q_pred == 1:
+                                    session_stats["quantum_correct"] += 1
+                                
+                        # HYBRID DECISION: Priority to Quantum Specialist for detected threats
                         if q_pred == 1:
                             prediction_result = 1
                             used_model = "Hybrid (QF+RF)"
-                            logger.info("Quantum Specialist detected a Rare Attack signature!")
+                            if rf_pred == 0:
+                                is_quantum_catch = True
+                                session_stats["quantum_catches"] += 1
+                                logger.info("QUANTUM CATCH! Specialist detected a threat missed by RF.")
                     except Exception as qe:
                         logger.debug(f"Quantum Audit Skipped: {qe}")
+                
+                # Update Final Hybrid Stats
+                if sniff_mode == "simulation" and "true_label" in packet_data:
+                    session_stats["hybrid_total"] += 1
+                    if prediction_result == packet_data["true_label"]:
+                        session_stats["hybrid_correct"] += 1
             elif "SVM" in models:
                 used_model = "SVM"
                 pred = models['SVM'].predict(X)
@@ -183,12 +231,22 @@ async def websocket_endpoint(websocket: WebSocket):
             
             latency = (time.time() - start_t) * 1000
             
+            # Calculate Session Metrics for JSON
+            c_acc = (session_stats["classical_correct"] / session_stats["classical_total"] * 100) if session_stats["classical_total"] > 0 else 0
+            q_acc = (session_stats["quantum_correct"] / session_stats["quantum_total"] * 100) if session_stats["quantum_total"] > 0 else 0
+            h_acc = (session_stats["hybrid_correct"] / session_stats["hybrid_total"] * 100) if session_stats["hybrid_total"] > 0 else 0
+
             packet_data.update({
                 "predicted": prediction_result,
                 "confidence_percent": round(confidence, 2),
                 "model_used": used_model,
                 "latency_ms": round(latency, 2),
-                "mode": sniff_mode
+                "mode": sniff_mode,
+                "is_quantum_catch": is_quantum_catch,
+                "session_classical_acc": round(c_acc, 2),
+                "session_quantum_acc": round(q_acc, 2),
+                "session_hybrid_acc": round(h_acc, 2),
+                "quantum_catch_count": session_stats["quantum_catches"]
             })
             
             await websocket.send_text(json.dumps(packet_data))

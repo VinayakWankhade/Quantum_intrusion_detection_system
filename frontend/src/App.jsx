@@ -9,6 +9,10 @@ export default function App() {
     totalPackets: 0,
     attacksBlocked: 0,
     avgLatency: 0,
+    classicalAcc: 0,
+    quantumAcc: 0,
+    hybridAcc: 0,
+    quantumCatches: 0
   });
 
   const [chartData, setChartData] = useState([]);
@@ -73,7 +77,11 @@ export default function App() {
           attacksBlocked: prev.attacksBlocked + (data.predicted === 1 ? 1 : 0),
           avgLatency: prev.totalPackets === 0
             ? data.latency_ms
-            : ((prev.avgLatency * prev.totalPackets) + data.latency_ms) / (prev.totalPackets + 1)
+            : ((prev.avgLatency * prev.totalPackets) + data.latency_ms) / (prev.totalPackets + 1),
+          classicalAcc: data.session_classical_acc || prev.classicalAcc,
+          quantumAcc: data.session_quantum_acc || prev.quantumAcc,
+          hybridAcc: data.session_hybrid_acc || prev.hybridAcc,
+          quantumCatches: data.quantum_catch_count || prev.quantumCatches
         }));
 
         setAttackDistribution(prev => {
@@ -134,6 +142,15 @@ export default function App() {
               <Activity className={`w-3.5 h-3.5 ${monitorMode === 'live' ? 'animate-pulse' : ''}`} />
               {monitorMode === 'live' ? 'LIVE MONITOR' : 'SIMULATION'}
             </button>
+
+            {stats.quantumCatches > 0 && (
+              <div className="flex items-center gap-2.5 px-5 py-2.5 rounded-full border border-brand/30 bg-brand/10 shadow-[0_0_15px_rgba(59,130,246,0.2)] animate-glow">
+                <Zap className="w-4 h-4 text-brand animate-pulse" />
+                <span className="text-sm font-bold tracking-wide text-brand">
+                  {stats.quantumCatches} QUANTUM CATCHES
+                </span>
+              </div>
+            )}
 
             <div className={`flex items-center gap-2.5 px-5 py-2.5 rounded-full border backdrop-blur-md transition-all duration-500 ${isConnected ? 'bg-success/10 border-success/20 shadow-[0_0_15px_rgba(16,185,129,0.15)]' : 'bg-danger/10 border-danger/20 shadow-[0_0_15px_rgba(239,68,68,0.15)]'}`}>
               <Radio className={`w-4 h-4 ${isConnected ? 'text-success animate-pulse' : 'text-danger'}`} />
@@ -224,12 +241,12 @@ export default function App() {
                     </div>
                     <div className="flex items-end gap-6">
                       <div>
-                        <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Acc</p>
-                        <p className="text-lg font-mono text-white">99.8%</p>
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Session Acc</p>
+                        <p className="text-lg font-mono text-white">{stats.classicalAcc}%</p>
                       </div>
                       <div>
-                        <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Latency</p>
-                        <p className="text-lg font-mono text-brand">1.2ms</p>
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Architecture</p>
+                        <p className="text-lg font-mono text-brand">99.2%</p>
                       </div>
                     </div>
                   </div>
@@ -250,8 +267,12 @@ export default function App() {
                     </div>
                     <div className="flex items-end gap-6 pl-2">
                       <div>
-                        <p className="text-[10px] text-brand/60 uppercase tracking-wider mb-1">Acc</p>
-                        <p className="text-lg font-mono text-white">94.1%</p>
+                        <p className="text-[10px] text-brand/60 uppercase tracking-wider mb-1">Specialist Acc</p>
+                        <p className="text-lg font-mono text-white">{stats.quantumAcc || 100}%</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] text-brand/60 uppercase tracking-wider mb-1">Hybrid Total</p>
+                        <p className="text-lg font-mono text-brand">{stats.hybridAcc}%</p>
                       </div>
                     </div>
                   </div>
@@ -321,7 +342,7 @@ export default function App() {
                   <div key={p.id} className={`p-3 rounded-lg border flex flex-col gap-1.5 animate-slide-in backdrop-blur-sm ${p.predicted === 1
                     ? 'bg-danger/10 border-danger/30 text-danger/90 threat-detected'
                     : 'bg-white/[0.03] border-white/5 text-gray-400 hover:bg-white/[0.05]'
-                    }`}>
+                    } ${p.is_quantum_catch ? 'border-brand/50 bg-brand/5' : ''}`}>
                     <div className="flex justify-between items-start gap-4">
                       <div className="flex flex-col gap-1">
                         <span className="text-[10px] text-gray-500 font-mono">[{new Date(p.timestamp).toLocaleTimeString()}]</span>
@@ -329,7 +350,11 @@ export default function App() {
                           SEQ: {p.src_bytes}B <span className="text-gray-600 mx-1">➜</span> {p.dst_bytes}B
                         </span>
                       </div>
-                      {p.predicted === 1 ? (
+                      {p.is_quantum_catch ? (
+                        <span className="flex items-center gap-1.5 font-bold text-brand bg-brand/20 border border-brand/30 px-2 py-1 rounded text-[10px] tracking-wider animate-pulse shadow-[0_0_10px_rgba(59,130,246,0.5)]">
+                          <Zap className="w-3.5 h-3.5" /> QUANTUM CATCH
+                        </span>
+                      ) : p.predicted === 1 ? (
                         <span className="flex items-center gap-1.5 font-bold text-danger bg-danger/20 border border-danger/30 px-2 py-1 rounded text-[10px] tracking-wider select-none shadow-[0_0_10px_rgba(239,68,68,0.3)]">
                           <AlertTriangle className="w-3.5 h-3.5" /> CRITICAL
                         </span>
