@@ -8,6 +8,7 @@ def encode_features(X):
     """
     Applies OneHotEncoding to categorical features, maintaining a DataFrame structure.
     Handles unseen categories in future test sets by ignoring them.
+    Returns (X_encoded, encoder)
     """
     logger.info("Encoding categorical features...")
 
@@ -16,7 +17,7 @@ def encode_features(X):
 
     if len(categorical_cols) == 0:
         logger.info("No categorical features found to encode.")
-        return X
+        return X, None
 
     # Initialize OneHotEncoder
     encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
@@ -33,4 +34,4 @@ def encode_features(X):
     X_encoded = pd.concat([X_numerical, encoded_df], axis=1)
 
     logger.info(f"Encoding complete. Features expanded from {X.shape[1]} to {X_encoded.shape[1]}")
-    return X_encoded
+    return X_encoded, encoder

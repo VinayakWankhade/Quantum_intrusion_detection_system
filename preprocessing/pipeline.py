@@ -1,4 +1,5 @@
 import pandas as pd
+import joblib
 from sklearn.model_selection import train_test_split
 
 from config.config import TEST_SIZE, RANDOM_STATE, PCA_EXPLAINED_VARIANCE
@@ -48,15 +49,26 @@ class PreprocessingPipeline:
             y = y.apply(lambda val: 0 if val == 21 else 1)
             
         # 4. Encode categorical features
-        X_encoded = encode_features(X)
+        X_encoded, encoder = encode_features(X)
         log_shape("Encoded dataset", X_encoded)
 
         # 5. Scale features
-        X_scaled = scale_features(X_encoded)
+        X_scaled, scaler = scale_features(X_encoded)
 
         # 6. PCA reduction
-        X_pca = apply_pca(X_scaled, n_components=PCA_EXPLAINED_VARIANCE)
+        X_pca, pca = apply_pca(X_scaled, n_components=PCA_EXPLAINED_VARIANCE)
         log_shape("PCA reduced dataset", X_pca)
+
+        # Save preprocessing objects for real-time inference
+        from utils.helpers import save_model
+        import os
+        pre_dir = "models/saved/preprocessing"
+        os.makedirs(pre_dir, exist_ok=True)
+        if encoder: save_model(encoder, os.path.join(pre_dir, "encoder.pkl"))
+        save_model(scaler, os.path.join(pre_dir, "scaler.pkl"))
+        save_model(pca, os.path.join(pre_dir, "pca.pkl"))
+        # Save feature names after encoding but before PCA to reconstruct vectors
+        joblib.dump(list(X_encoded.columns), os.path.join(pre_dir, "feature_names.pkl"))
 
         # 7. Balance Data (SMOTE)
         # It's better to balance the training split rather than full data to avoid data leakage

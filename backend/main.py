@@ -9,58 +9,75 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import joblib
 import random
+import threading
+from queue import Queue
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.config import MODELS_DIR, TEST_DATA_PATH
 from utils.helpers import get_logger
+try:
+    from utils.sniffer import PacketSniffer
+except ImportError:
+    PacketSniffer = None
 
 logger = get_logger(__name__)
 
-# Global variables to hold loaded models and test data
+# Global variables
 models = {}
 test_df = None
+live_packet_queue = Queue()
+sniff_mode = "simulation" # "simulation" or "live"
+sniffer = None
+
+def packet_callback(pkt_data):
+    live_packet_queue.put(pkt_data)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global models, test_df
+    global models, test_df, sniffer
     logger.info("Starting up FastAPI Backend for Quantum IDS")
     
-    # Try to load Classical Models
-    try:
-        models['SVM'] = joblib.load(os.path.join(MODELS_DIR, "svm_model.pkl"))
-        logger.info("Successfully loaded SVM Model")
-    except Exception as e:
-        logger.warning(f"Could not load SVM: {e}")
-        
-    try:
-        models['RandomForest'] = joblib.load(os.path.join(MODELS_DIR, "random_forest_model.pkl"))
-        logger.info("Successfully loaded Random Forest Model")
-    except Exception as e:
-        logger.warning(f"Could not load Random Forest: {e}")
-        
-    try:
-        models['QSVM'] = joblib.load(os.path.join(MODELS_DIR, "qsvm_model.pkl"))
-        logger.info("Successfully loaded QSVM Model")
-    except Exception as e:
-        logger.warning(f"Could not load QSVM: {e}")
-        
-    try:
-        models['VQC'] = joblib.load(os.path.join(MODELS_DIR, "vqc_model.pkl"))
-        logger.info("Successfully loaded VQC Model")
-    except Exception as e:
-        logger.warning(f"Could not load VQC: {e}")
+    # Load Unified Models
+    path = os.path.join(MODELS_DIR, "unified_rf_model.pkl")
+    if os.path.exists(path):
+        try:
+            models["RandomForest"] = joblib.load(path)
+            logger.info("Loaded Unified RandomForest Model")
+        except Exception as e:
+            logger.warning(f"Failed to load Unified Model: {e}")
 
-    # Load test dataset to act as "live traffic" pool
+    # Load Quantum Specialist
+    q_path = os.path.join(MODELS_DIR, "qsvc_specialist.pkl")
+    if os.path.exists(q_path):
+        try:
+            models["QSVM_Specialist"] = joblib.load(q_path)
+            pre_dir = "models/saved/preprocessing/quantum"
+            models["q_scaler"] = joblib.load(os.path.join(pre_dir, "scaler_specialist.pkl"))
+            models["q_pca"] = joblib.load(os.path.join(pre_dir, "pca_specialist.pkl"))
+            logger.info("Loaded Quantum Specialist (QSVC) for Rare Attacks")
+        except Exception as e:
+            logger.warning(f"Failed to load Quantum Specialist: {e}")
+
+    # Load test dataset
     try:
         test_df = pd.read_csv(TEST_DATA_PATH)
-        logger.info(f"Loaded {len(test_df)} rows of test data for simulation")
+        logger.info(f"Loaded {len(test_df)} rows for simulation")
     except Exception as e:
         logger.error(f"Could not load test dataset: {e}")
 
+    # Initialize Sniffer but don't start yet
+    if PacketSniffer:
+        try:
+            sniffer = PacketSniffer(callback=packet_callback)
+            logger.info("Real-time Sniffer initialized.")
+        except Exception as e:
+            logger.warning(f"Sniffer initialization failed: {e}")
+
     yield
     
+    if sniffer: sniffer.stop()
     logger.info("Shutting down FastAPI Backend")
     models.clear()
 
@@ -79,36 +96,81 @@ app.add_middleware(
 def read_root():
     return {"status": "Online", "message": "Quantum IDS Real-Time Engine is running."}
 
+@app.get("/toggle-mode")
+async def toggle_mode(mode: str):
+    global sniff_mode, sniffer
+    if mode not in ["simulation", "live"]:
+        return {"error": "Invalid mode"}
+    
+    sniff_mode = mode
+    if mode == "live" and sniffer:
+        sniffer.start()
+        logger.info("Switching to LIVE SNIFFING mode.")
+    elif mode == "simulation" and sniffer:
+        sniffer.stop()
+        logger.info("Switching to SIMULATION mode.")
+    
+    return {"status": "Success", "current_mode": sniff_mode}
+
 @app.websocket("/ws/traffic")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    logger.info("New WebSocket connection established for Live Traffic.")
+    logger.info(f"WebSocket established. Initial Mode: {sniff_mode}")
     
-    if test_df is None or len(models) == 0:
-        await websocket.send_text(json.dumps({"error": "System not fully initialized (models/data missing)."}))
-        await websocket.close()
-        return
-
-    # Simulate live traffic by yielding random rows from the test set
     try:
         while True:
-            # Pick a random row
-            sample = test_df.sample(1)
-            X = sample.drop("label", axis=1)
-            true_y = int(sample["label"].values[0])
+            packet_data = {}
+            X = None
             
-            # Predict with Random Forest for speed of simulation, if available
+            if sniff_mode == "live":
+                if not live_packet_queue.empty():
+                    packet_data = live_packet_queue.get()
+                    X = packet_data.pop("raw_features")
+                else:
+                    await asyncio.sleep(0.1)
+                    continue
+            else:
+                # Simulation Mode
+                if test_df is None: break
+                sample = test_df.sample(1)
+                X = sample.drop("label", axis=1)
+                true_y = int(sample["label"].values[0])
+                packet_data = {
+                    "timestamp": pd.Timestamp.now().isoformat(),
+                    "src_bytes": int(sample["src_bytes"].values[0]) if "src_bytes" in sample.columns else 0,
+                    "dst_bytes": int(sample["dst_bytes"].values[0]) if "dst_bytes" in sample.columns else 0,
+                    "protocol_type": str(sample["protocol_type"].values[0]) if "protocol_type" in sample.columns else "tcp",
+                    "true_label": true_y
+                }
+
+            # Inference
             prediction_result = -1
             confidence = 0.0
             used_model = "None"
-            
             start_t = time.time()
+            
             if "RandomForest" in models:
                 used_model = "RandomForest"
                 pred = models['RandomForest'].predict(X)
                 prediction_result = int(pred[0])
-                probs = models['RandomForest'].predict_proba(X)
-                confidence = float(probs[0].max() * 100)
+                confidence = float(models['RandomForest'].predict_proba(X)[0].max() * 100)
+                
+                # Hybrid Logic: Quantum Specialist Audit
+                if "QSVM_Specialist" in models:
+                    try:
+                        # Extract core features for Quantum (must match specialist training)
+                        # X is a DataFrame (Simulation) or something from sniffer (Live)
+                        q_feat = X[['duration', 'src_bytes', 'dst_bytes', 'count', 'srv_count']]
+                        q_scaled = models["q_scaler"].transform(q_feat)
+                        q_pca = models["q_pca"].transform(q_scaled)
+                        q_pred = models["QSVM_Specialist"].predict(q_pca)[0]
+                        
+                        if q_pred == 1:
+                            prediction_result = 1
+                            used_model = "Hybrid (QF+RF)"
+                            logger.info("Quantum Specialist detected a Rare Attack signature!")
+                    except Exception as qe:
+                        logger.debug(f"Quantum Audit Skipped: {qe}")
             elif "SVM" in models:
                 used_model = "SVM"
                 pred = models['SVM'].predict(X)
@@ -119,30 +181,22 @@ async def websocket_endpoint(websocket: WebSocket):
                 except:
                     confidence = 85.0 # fallback if probability=False
             
-            latency = (time.time() - start_t) * 1000 # ms
+            latency = (time.time() - start_t) * 1000
             
-            # Additional Quantum metrics simulation for the dashboard comparison
-            q_latency = latency * random.uniform(15, 30) # Simulated higher latency for quantum on classical hw
-            
-            packet_data = {
-                "timestamp": pd.Timestamp.now().isoformat(),
-                "src_bytes": int(sample["src_bytes"].values[0]) if "src_bytes" in sample else random.randint(0, 1000),
-                "dst_bytes": int(sample["dst_bytes"].values[0]) if "dst_bytes" in sample else random.randint(0, 1000),
-                "protocol_type": int(sample["protocol_type"].values[0]) if "protocol_type" in sample else 6,
-                "true_label": true_y, # 0 for Benign, 1 for Attack
+            packet_data.update({
                 "predicted": prediction_result,
                 "confidence_percent": round(confidence, 2),
                 "model_used": used_model,
                 "latency_ms": round(latency, 2),
-                "qsvm_simulated_latency_ms": round(q_latency, 2)
-            }
+                "mode": sniff_mode
+            })
             
             await websocket.send_text(json.dumps(packet_data))
             
-            # Wait 1-3 seconds before sending the next packet
-            await asyncio.sleep(random.uniform(1.0, 3.0))
-            
+            if sniff_mode == "simulation":
+                await asyncio.sleep(random.uniform(1.0, 2.0))
+                
     except WebSocketDisconnect:
-        logger.info("WebSocket connection closed by client.")
+        logger.info("Client disconnected.")
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.error(f"WS error: {e}")

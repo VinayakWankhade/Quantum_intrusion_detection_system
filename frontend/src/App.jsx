@@ -27,6 +27,22 @@ export default function App() {
     }
   }, [trafficStream]);
 
+  const [monitorMode, setMonitorMode] = useState('simulation');
+
+  const toggleMonitorMode = async () => {
+    const newMode = monitorMode === 'simulation' ? 'live' : 'simulation';
+    try {
+      const resp = await fetch(`http://localhost:8000/toggle-mode?mode=${newMode}`);
+      const data = await resp.json();
+      if (data.status === 'Success') {
+        setMonitorMode(newMode);
+        setTrafficStream([]); // Clear stream on mode change
+      }
+    } catch (err) {
+      console.error("Failed to toggle mode:", err);
+    }
+  };
+
   useEffect(() => {
     const initData = Array.from({ length: 25 }, (_, i) => ({
       time: i,
@@ -43,6 +59,9 @@ export default function App() {
       ws.current.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.error) return;
+
+        // Sync local mode if backend sends it
+        if (data.mode && data.mode !== monitorMode) setMonitorMode(data.mode);
 
         setTrafficStream(prev => {
           const newStream = [...prev, { ...data, id: Date.now() + Math.random() }];
@@ -70,7 +89,7 @@ export default function App() {
           const lastPoint = { ...newData[newData.length - 1] };
           newData.push({
             time: new Date(data.timestamp).toLocaleTimeString([], { hour12: false, second: '2-digit', minute: '2-digit' }),
-            volume: lastPoint.volume * 0.5 + (data.src_bytes / 50) + Math.random() * 20,
+            volume: data.mode === 'live' ? (data.src_bytes / 10) : (lastPoint.volume * 0.5 + (data.src_bytes / 50) + Math.random() * 20),
             attacks: data.predicted === 1 ? 80 : 0
           });
           return newData;
@@ -85,13 +104,13 @@ export default function App() {
 
     connectWebSocket();
     return () => ws.current && ws.current.close();
-  }, []);
+  }, [monitorMode]);
 
   return (
-    <div className="min-h-screen p-4 md:p-6 lg:p-8 flex flex-col items-center">
-      <div className="w-full max-w-7xl">
+    <div className="h-screen p-4 md:p-6 lg:p-8 flex flex-col items-center overflow-hidden">
+      <div className="w-full max-w-7xl flex flex-col h-full">
         {/* Header */}
-        <header className="flex justify-between items-center mb-8 relative z-10">
+        <header className="flex justify-between items-center mb-6 relative z-10 flex-shrink-0">
           <div className="flex items-center gap-4">
             <div className="relative group">
               <div className="absolute -inset-1 bg-gradient-to-r from-brand to-accent rounded-2xl blur opacity-25 group-hover:opacity-50 transition duration-500"></div>
@@ -108,6 +127,14 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-4">
+            <button
+              onClick={toggleMonitorMode}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-xs font-bold tracking-widest transition-all duration-300 ${monitorMode === 'live' ? 'bg-accent/20 border-accent text-accent shadow-[0_0_15px_rgba(59,130,246,0.3)]' : 'bg-white/5 border-white/10 text-gray-400 hover:bg-white/10'}`}
+            >
+              <Activity className={`w-3.5 h-3.5 ${monitorMode === 'live' ? 'animate-pulse' : ''}`} />
+              {monitorMode === 'live' ? 'LIVE MONITOR' : 'SIMULATION'}
+            </button>
+
             <div className={`flex items-center gap-2.5 px-5 py-2.5 rounded-full border backdrop-blur-md transition-all duration-500 ${isConnected ? 'bg-success/10 border-success/20 shadow-[0_0_15px_rgba(16,185,129,0.15)]' : 'bg-danger/10 border-danger/20 shadow-[0_0_15px_rgba(239,68,68,0.15)]'}`}>
               <Radio className={`w-4 h-4 ${isConnected ? 'text-success animate-pulse' : 'text-danger'}`} />
               <span className={`text-sm font-bold tracking-wide ${isConnected ? 'text-successglow-text text-success' : 'text-danger'}`}>
@@ -117,13 +144,13 @@ export default function App() {
           </div>
         </header>
 
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 relative z-10">
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 relative z-10 flex-1 min-h-0 overflow-hidden">
 
           {/* Main Content Area */}
-          <div className="xl:col-span-8 flex flex-col gap-8">
+          <div className="xl:col-span-8 flex flex-col gap-6 overflow-y-auto pr-2 scrollbar-thin">
 
             {/* Top KPI Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 flex-shrink-0">
               {[
                 { title: "Processed Packets", value: stats.totalPackets.toLocaleString(), icon: <Activity className="w-4 h-4 text-brand" />, color: "brand" },
                 { title: "Anomalies Neutralized", value: stats.attacksBlocked.toLocaleString(), icon: <AlertTriangle className="w-4 h-4 text-danger" />, color: "danger", highlight: true },
@@ -145,7 +172,7 @@ export default function App() {
             </div>
 
             {/* Traffic Volume Chart */}
-            <div className="glass-panel p-6 flex-1 min-h-[350px] flex flex-col">
+            <div className="glass-panel p-6 flex flex-col min-h-[350px] flex-shrink-0">
               <div className="flex justify-between items-center mb-6">
                 <h2 className="text-lg font-bold flex items-center gap-2 tracking-wide">
                   <Network className="w-5 h-5 text-accent" />
@@ -156,7 +183,7 @@ export default function App() {
                   <div className="flex items-center gap-2"><div className="w-2.5 h-2.5 rounded-full bg-danger shadow-[0_0_8px_rgba(239,68,68,0.8)]"></div><span className="text-xs text-gray-400 font-medium tracking-wider">THREATS</span></div>
                 </div>
               </div>
-              <div className="flex-1 w-full relative -ml-4">
+              <div className="flex-1 w-full relative -ml-4 min-h-[250px]">
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                     <defs>
@@ -184,7 +211,7 @@ export default function App() {
             </div>
 
             {/* Model Comparison */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-4 flex-shrink-0">
               <div className="glass-panel p-6">
                 <h3 className="text-xs font-bold text-gray-400 mb-5 flex items-center gap-2 uppercase tracking-widest border-b border-white/10 pb-3">
                   <Cpu className="w-4 h-4 text-gray-300" /> Classical Processing
@@ -234,10 +261,10 @@ export default function App() {
           </div>
 
           {/* Right Column - Terminal & Pie */}
-          <div className="xl:col-span-4 flex flex-col gap-8 h-full">
+          <div className="xl:col-span-4 flex flex-col gap-8 h-full min-h-0">
 
             {/* Attack Distribution Donut */}
-            <div className="glass-panel p-6 h-[350px] flex flex-col">
+            <div className="glass-panel p-6 h-[300px] flex flex-col flex-shrink-0">
               <h2 className="text-[11px] font-bold text-gray-400 mb-2 uppercase tracking-widest text-center">Threat Distribution</h2>
               <div className="flex-1 w-full relative">
                 <ResponsiveContainer width="100%" height="100%">
@@ -246,8 +273,8 @@ export default function App() {
                       data={attackDistribution}
                       cx="50%"
                       cy="50%"
-                      innerRadius={80}
-                      outerRadius={100}
+                      innerRadius={70}
+                      outerRadius={90}
                       paddingAngle={8}
                       dataKey="value"
                       stroke="none"
@@ -273,8 +300,8 @@ export default function App() {
             </div>
 
             {/* Live Terminal Log */}
-            <div className="glass-panel flex-1 flex flex-col overflow-hidden min-h-[450px]">
-              <div className="px-5 py-4 border-b border-white/5 bg-surfaceHighlight/50 flex justify-between items-center z-10">
+            <div className="glass-panel flex-1 flex flex-col overflow-hidden min-h-0">
+              <div className="px-5 py-4 border-b border-white/5 bg-surfaceHighlight/50 flex justify-between items-center z-10 flex-shrink-0">
                 <h2 className="text-[11px] font-bold flex items-center gap-2 uppercase tracking-widest text-gray-300">
                   <HardDrive className="w-4 h-4 text-accent" />
                   Live Triage Console
@@ -286,14 +313,14 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="flex-1 overflow-y-auto p-4 space-y-2.5 bg-black/40 terminal-text relative">
+              <div className="flex-1 overflow-y-auto p-4 space-y-2.5 bg-black/40 terminal-text relative scrollbar-thin">
                 {trafficStream.length === 0 && (
                   <div className="text-gray-500 flex items-center justify-center h-full animate-pulse tracking-widest text-xs uppercase">Initializing socket connection...</div>
                 )}
                 {trafficStream.map((p) => (
                   <div key={p.id} className={`p-3 rounded-lg border flex flex-col gap-1.5 animate-slide-in backdrop-blur-sm ${p.predicted === 1
-                      ? 'bg-danger/10 border-danger/30 text-danger/90 threat-detected'
-                      : 'bg-white/[0.03] border-white/5 text-gray-400 hover:bg-white/[0.05]'
+                    ? 'bg-danger/10 border-danger/30 text-danger/90 threat-detected'
+                    : 'bg-white/[0.03] border-white/5 text-gray-400 hover:bg-white/[0.05]'
                     }`}>
                     <div className="flex justify-between items-start gap-4">
                       <div className="flex flex-col gap-1">

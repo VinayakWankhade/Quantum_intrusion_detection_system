@@ -8,7 +8,7 @@ logger = get_logger(__name__)
 def scale_features(X):
     """
     Scales features based on configuration (RobustScaler or StandardScaler).
-    Returns a pandas DataFrame to maintain feature names. 
+    Returns (X_scaled, scaler)
     """
     logger.info(f"Scaling features using {SCALER_TYPE} scaler...")
 
@@ -17,7 +17,8 @@ def scale_features(X):
     else:
         scaler = StandardScaler()
 
-    # We convert back to DataFrame to preserve column names
-    X_scaled = pd.DataFrame(scaler.fit_transform(X), columns=X.columns, index=X.index)
+    # Fit and transform
+    X_scaled_raw = scaler.fit_transform(X)
+    X_scaled = pd.DataFrame(X_scaled_raw, columns=X.columns, index=X.index)
 
-    return X_scaled
+    return X_scaled, scaler
